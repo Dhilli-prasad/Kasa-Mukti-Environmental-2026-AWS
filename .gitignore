@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+!.env.production.example
+.aws-sam/
+.aws/
+frontend/dist/
+frontend/node_modules/
+__pycache__/
+*.py[cod]
+.venv/
+samconfig.toml
+*.log

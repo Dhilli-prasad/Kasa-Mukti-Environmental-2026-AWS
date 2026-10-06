@@ -1,0 +1,639 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: KasaMukti circular waste management platform
+
+Parameters:
+  EnvironmentName:
+    Type: String
+    Default: development
+    AllowedValues:
+      - development
+      - production
+  TableName:
+    Type: String
+    Default: ''
+  WasteClassifierProvider:
+    Type: String
+    Default: mock
+    AllowedValues:
+      - mock
+      - bedrock
+    Description: Use mock for deployment smoke tests or bedrock after model access is enabled.
+  BedrockDisabled:
+    Type: String
+    Default: 'true'
+    AllowedValues:
+      - 'true'
+      - 'false'
+  AllowDemoIdentity:
+    Type: String
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+    Description: Opt-in only for an unauthenticated hackathon demo; keep false in production.
+  KnowledgeBaseId:
+    Type: String
+    Default: ''
+    Description: Optional Bedrock Knowledge Base ID containing approved KasaMukti guidance.
+  NotificationsEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  SesEnabled:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+  SesSenderEmail:
+    Type: String
+    Default: ''
+    Description: Verified SES sender identity.
+
+Conditions:
+  HasCustomTableName:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: TableName
+          - ''
+  HasKnowledgeBaseId:
+    Fn::Not:
+      - Fn::Equals:
+          - Ref: KnowledgeBaseId
+          - ''
+
+Globals:
+  Function:
+    Runtime: python3.12
+    Timeout: 30
+    MemorySize: 512
+    Environment:
+      Variables:
+        TABLE_NAME:
+          Fn::If:
+            - HasCustomTableName
+            - Ref: TableName
+            - !Sub KasaMuktiCore-${EnvironmentName}
+        BUCKET_NAME: !Ref WasteMediaBucket
+        TOPIC_ARN: !Ref HazardAlertTopic
+        BEDROCK_MODEL_ID: anthropic.claude-3-5-sonnet-20240620-v1:0
+        BEDROCK_DISABLED: !Ref BedrockDisabled
+        ALLOW_DEMO_IDENTITY: !Ref AllowDemoIdentity
+        KNOWLEDGE_BASE_ID: !Ref KnowledgeBaseId
+        NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+        NOTIFICATIONS_ENABLED: !Ref NotificationsEnabled
+        GREENPOINT_REWARD_RULES_JSON: ''
+        POWERTOOLS_SERVICE_NAME: kasamukti
+
+Resources:
+  KasaMuktiApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: $default
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Citizen-Id
+          - X-Demo-Role
+          - X-Demo-User
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - PATCH
+          - OPTIONS
+        MaxAge: 600
+
+  KasaMuktiCore:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName:
+        Fn::If:
+          - HasCustomTableName
+          - Ref: TableName
+          - !Sub KasaMuktiCore-${EnvironmentName}
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: materialType
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+        - AttributeName: workflowStatus
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: MaterialTypeIndex
+          KeySchema:
+            - AttributeName: materialType
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: WorkflowIndex
+          KeySchema:
+            - AttributeName: workflowStatus
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+
+  WasteMediaBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins:
+              - '*'
+            AllowedMethods:
+              - PUT
+              - POST
+              - GET
+            AllowedHeaders:
+              - '*'
+            ExposedHeaders:
+              - ETag
+            MaxAge: 3600
+
+  HazardAlertTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub kasamukti-hazard-alerts-${EnvironmentName}
+      DisplayName: KasaMukti Hazard Alerts
+
+  NotificationTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: !Sub kasamukti-notifications-${EnvironmentName}
+      DisplayName: KasaMukti notification events
+
+  KasaMuktiUserPool:
+    Type: AWS::Cognito::UserPool
+    Properties:
+      UserPoolName: !Sub KasaMuktiUsers-${EnvironmentName}
+      AutoVerifiedAttributes:
+        - email
+      UsernameAttributes:
+        - email
+      Policies:
+        PasswordPolicy:
+          MinimumLength: 10
+          RequireLowercase: true
+          RequireNumbers: true
+          RequireUppercase: true
+          RequireSymbols: true
+      LambdaConfig:
+        PostConfirmation: !GetAtt CognitoPostConfirmation.Arn
+
+  KasaMuktiUserPoolClient:
+    Type: AWS::Cognito::UserPoolClient
+    Properties:
+      UserPoolId: !Ref KasaMuktiUserPool
+      GenerateSecret: false
+      ExplicitAuthFlows:
+        - ALLOW_USER_PASSWORD_AUTH
+        - ALLOW_REFRESH_TOKEN_AUTH
+        - ALLOW_USER_SRP_AUTH
+
+  KasaMuktiGroups:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: MUNICIPAL_WORKER
+      UserPoolId: !Ref KasaMuktiUserPool
+      Precedence: 20
+  KasaMuktiCitizenGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: CITIZEN
+      UserPoolId: !Ref KasaMuktiUserPool
+      Precedence: 60
+  KasaMuktiFarmerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: FARMER
+      UserPoolId: !Ref KasaMuktiUserPool
+      Precedence: 50
+  KasaMuktiOfficerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: MUNICIPAL_OFFICER
+      UserPoolId: !Ref KasaMuktiUserPool
+      Precedence: 10
+  KasaMuktiPartnerGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: RECOVERY_PARTNER
+      UserPoolId: !Ref KasaMuktiUserPool
+      Precedence: 40
+  KasaMuktiAdminGroup:
+    Type: AWS::Cognito::UserPoolGroup
+    Properties:
+      GroupName: ADMIN
+      UserPoolId: !Ref KasaMuktiUserPool
+      Precedence: 1
+
+  KasaMuktiApiAuthorizer:
+    Type: AWS::ApiGatewayV2::Authorizer
+    Properties:
+      ApiId: !Ref KasaMuktiApi
+      AuthorizerType: JWT
+      AuthorizerPayloadFormatVersion: '2.0'
+      IdentitySource:
+        - $request.header.Authorization
+      JwtConfiguration:
+        Audience:
+          - !Ref KasaMuktiUserPoolClient
+        Issuer: !Sub https://cognito-idp.${AWS::Region}.${AWS::URLSuffix}/${KasaMuktiUserPool}
+
+  WasteOrchestrator:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub KasaMukti-WasteOrchestrator-${EnvironmentName}
+      CodeUri: backend/
+      Handler: handler.lambda_handler
+      Environment:
+        Variables:
+          WASTE_CLASSIFIER_PROVIDER: !Ref WasteClassifierProvider
+      Policies:
+        - Statement:
+            - Sid: InvokeBedrockVision
+              Effect: Allow
+              Action:
+                - bedrock:InvokeModel
+              Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}::foundation-model/anthropic.claude-3-5-sonnet-*
+            - Fn::If:
+                - HasKnowledgeBaseId
+                - Sid: RetrieveVerifiedKnowledge
+                  Effect: Allow
+                  Action:
+                    - bedrock:Retrieve
+                  Resource: !Sub arn:${AWS::Partition}:bedrock:${AWS::Region}:${AWS::AccountId}:knowledge-base/${KnowledgeBaseId}
+                - Ref: AWS::NoValue
+            - Sid: ReadWriteCoreTable
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:GetItem
+                - dynamodb:UpdateItem
+                - dynamodb:Query
+                - dynamodb:Scan
+              Resource:
+                - !GetAtt KasaMuktiCore.Arn
+                - !Sub ${KasaMuktiCore.Arn}/index/*
+            - Sid: StoreWasteMedia
+              Effect: Allow
+              Action:
+                - s3:PutObject
+                - s3:GetObject
+              Resource: !Sub ${WasteMediaBucket.Arn}/*
+            - Sid: PublishHazardAlerts
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref HazardAlertTopic
+      Events:
+        VersionedApi:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /api/v1/{proxy+}
+            Method: ANY
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Analyze:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /analyze
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+
+        Verify:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /verify
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Inventory:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /inventory
+            Method: GET
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        CollectionEvents:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /collection-events
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Batches:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /batches
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        UpdateBatch:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /batches/{batchId}
+            Method: PATCH
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Projects:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /projects
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        ListProjects:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /projects
+            Method: GET
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        ProjectApproval:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /projects/{projectId}/approval
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        ProjectAllocation:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /projects/{projectId}/allocate
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        ProjectStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /projects/{projectId}
+            Method: PATCH
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        PublicProject:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /public-projects/{qrToken}
+            Method: GET
+        Matches:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /matches
+            Method: GET
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        AcceptMatch:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /matches/{matchId}/accept
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        PartnerProfile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /partners/me
+            Method: PUT
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        PartnerVerification:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /partners/{partnerId}/verification
+            Method: PATCH
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Centers:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /centers
+            Method: GET
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        CreateCenter:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /centers
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Profile:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /profile
+            Method: GET
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Analytics:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /analytics
+            Method: GET
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        Chat:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /chat
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        RecoveryRequests:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /recovery-requests
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        UpdateRecoveryRequest:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /recovery-requests/{requestId}
+            Method: PATCH
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        SchedulePickup:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /recovery-requests/{requestId}/pickup
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        RecoveryStatus:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /batches/{batchId}/recovery-status
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        RecoveryResult:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /batches/{batchId}/recovery-result
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        AggregationOpportunities:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /aggregation-opportunities
+            Method: POST
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+        CopilotTools:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref KasaMuktiApi
+            Path: /copilot/tools
+            Method: GET
+            Auth:
+              Authorizer: KasaMuktiApiAuthorizer
+
+  WasteOrchestratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      LogGroupName: !Sub /aws/lambda/KasaMukti-WasteOrchestrator-${EnvironmentName}
+      RetentionInDays: 30
+
+  CognitoPostConfirmation:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub KasaMukti-CognitoPostConfirmation-${EnvironmentName}
+      CodeUri: backend/
+      Handler: cognito_trigger.handler
+      Runtime: python3.12
+      Timeout: 10
+      Environment:
+        Variables:
+          NOTIFICATION_TOPIC_ARN: !Ref NotificationTopic
+          NOTIFICATIONS_ENABLED: !Ref NotificationsEnabled
+      Policies:
+        - Statement:
+            - Sid: AssignDefaultCitizenGroup
+              Effect: Allow
+              Action:
+                - cognito-idp:AdminAddUserToGroup
+              Resource: !Sub arn:${AWS::Partition}:cognito-idp:${AWS::Region}:${AWS::AccountId}:userpool/*
+            - Sid: PublishWelcomeNotification
+              Effect: Allow
+              Action:
+                - sns:Publish
+              Resource: !Ref NotificationTopic
+
+  CognitoPostConfirmationPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref CognitoPostConfirmation
+      Principal: cognito-idp.amazonaws.com
+      SourceArn: !GetAtt KasaMuktiUserPool.Arn
+
+  NotificationWorker:
+    Type: AWS::Serverless::Function
+    Properties:
+      FunctionName: !Sub KasaMukti-NotificationWorker-${EnvironmentName}
+      CodeUri: backend/
+      Handler: notification_worker.handler
+      Timeout: 30
+      Environment:
+        Variables:
+          TABLE_NAME: !If [HasCustomTableName, !Ref TableName, !Sub KasaMuktiCore-${EnvironmentName}]
+          USER_POOL_ID: !Ref KasaMuktiUserPool
+          SES_ENABLED: !Ref SesEnabled
+          SES_SENDER_EMAIL: !Ref SesSenderEmail
+      Policies:
+        - Statement:
+            - Sid: NotificationTableWrites
+              Effect: Allow
+              Action:
+                - dynamodb:PutItem
+                - dynamodb:UpdateItem
+              Resource: !GetAtt KasaMuktiCore.Arn
+            - Sid: ResolveUserEmail
+              Effect: Allow
+              Action:
+                - cognito-idp:AdminGetUser
+                - cognito-idp:ListUsersInGroup
+              Resource: !GetAtt KasaMuktiUserPool.Arn
+            - Sid: SendTransactionalEmail
+              Effect: Allow
+              Action:
+                - ses:SendEmail
+              Resource: '*'
+      Events:
+        NotificationEvents:
+          Type: SNS
+          Properties:
+            Topic: !Ref NotificationTopic
+
+Outputs:
+  ApiUrl:
+    Description: KasaMukti API endpoint
+    Value: !Sub https://${KasaMuktiApi}.execute-api.${AWS::Region}.${AWS::URLSuffix}
+  UploadBucket:
+    Value: !Ref WasteMediaBucket
+  HazardTopic:
+    Value: !Ref HazardAlertTopic
+  UserPoolId:
+    Value: !Ref KasaMuktiUserPool
+  UserPoolClientId:
+    Value: !Ref KasaMuktiUserPoolClient
+  KnowledgeBaseId:
+    Value: !Ref KnowledgeBaseId

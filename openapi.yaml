@@ -1,0 +1,293 @@
+openapi: 3.0.3
+info:
+  title: KasaMukti API
+  version: 1.0.0
+  description: Authenticated AWS API Gateway and Lambda API for circular recovery.
+servers:
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com/api/v1
+    variables:
+      apiId: { default: example }
+      region: { default: ap-south-1 }
+security:
+  - Cognito: []
+paths:
+  /waste/analyze:
+    post:
+      operationId: analyzeWaste
+      security: [{Cognito: []}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/WasteAnalyzeRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+        '401': {$ref: '#/components/responses/Unauthorized'}
+  /collections/events:
+    post:
+      operationId: createCollectionEvent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/CollectionEvent'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /material-bank:
+    get:
+      operationId: getMaterialBank
+      parameters:
+        - {$ref: '#/components/parameters/materialType'}
+        - {$ref: '#/components/parameters/status'}
+        - {$ref: '#/components/parameters/ward'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+  /batches:
+    post:
+      operationId: createBatch
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/BatchRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/Success'}
+  /batches/{batchId}/status:
+    patch:
+      operationId: updateBatchStatus
+      parameters: [{$ref: '#/components/parameters/batchId'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StatusRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '400': {$ref: '#/components/responses/ValidationError'}
+  /aggregation/opportunities:
+    post:
+      operationId: createAggregationOpportunity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AggregationRequest'}
+      responses:
+        '201': {$ref: '#/components/responses/Success'}
+  /matching:
+    get:
+      operationId: getRecoveryMatches
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+  /recovery/requests:
+    post:
+      operationId: createRecoveryRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [batchId, partnerId]
+              properties:
+                batchId: {type: string}
+                partnerId: {type: string}
+      responses:
+        '201': {$ref: '#/components/responses/Success'}
+  /recovery/{id}/status:
+    patch:
+      operationId: updateRecoveryStatus
+      parameters: [{$ref: '#/components/parameters/id'}]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/StatusRequest'}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+  /analytics/municipal:
+    get:
+      operationId: getMunicipalAnalytics
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+  /copilot/query:
+    post:
+      operationId: queryCopilot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message]
+              properties:
+                message: {type: string, maxLength: 2000}
+                conversationId: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /chat:
+    post:
+      operationId: chat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                message: {type: string, maxLength: 2000}
+                imageData: {type: string}
+                conversationId: {type: string}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+  /greenpoints/award:
+    post:
+      operationId: awardGreenPoints
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [scanId, verifiedWeightKg]
+              properties:
+                scanId: {type: string}
+                verifiedWeightKg: {type: number, minimum: 0.001}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+        '403': {$ref: '#/components/responses/Forbidden'}
+  /impact:
+    get:
+      operationId: getImpact
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+  /campaigns:
+    get:
+      operationId: listCampaigns
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+    post:
+      operationId: createCampaign
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, startAt, endAt]
+              properties:
+                name: {type: string}
+                description: {type: string}
+                startAt: {type: string, format: date-time}
+                endAt: {type: string, format: date-time}
+                targetWard: {type: string}
+      responses:
+        '201': {$ref: '#/components/responses/Success'}
+  /reports:
+    get:
+      operationId: getReports
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+  /projects:
+    get:
+      operationId: listProjects
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+    post:
+      operationId: createProject
+      responses:
+        '201': {$ref: '#/components/responses/Success'}
+  /qr/{token}:
+    get:
+      operationId: getPublicProject
+      security: []
+      parameters:
+        - {name: token, in: path, required: true, schema: {type: string}}
+      responses:
+        '200': {$ref: '#/components/responses/Success'}
+components:
+  securitySchemes:
+    Cognito:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  parameters:
+    batchId: {name: batchId, in: path, required: true, schema: {type: string}}
+    id: {name: id, in: path, required: true, schema: {type: string}}
+    materialType: {name: materialType, in: query, schema: {type: string}}
+    status: {name: status, in: query, schema: {type: string}}
+    ward: {name: ward, in: query, schema: {type: string}}
+  schemas:
+    WasteAnalyzeRequest:
+      type: object
+      required: [imageData]
+      properties:
+        imageData: {type: string, description: Data URL or persisted S3 image reference}
+        description: {type: string, maxLength: 1000}
+        ocrText: {type: string, maxLength: 2000}
+    CollectionEvent:
+      type: object
+      required: [scanId, collectionCenterId, weightKg]
+      properties:
+        scanId: {type: string}
+        collectionCenterId: {type: string}
+        weightKg: {type: number, minimum: 0.001}
+        materialType: {type: string}
+    BatchRequest:
+      type: object
+      required: [scanIds, materialType, quantity]
+      properties:
+        scanIds: {type: array, items: {type: string}, minItems: 1}
+        materialType: {type: string}
+        quantity: {type: integer, minimum: 1}
+        qualityStatus: {type: string}
+    AggregationRequest:
+      type: object
+      required: [sourceBatchIds]
+      properties:
+        sourceBatchIds: {type: array, items: {type: string}, minItems: 1}
+        quality: {type: string}
+        contamination: {type: string}
+    StatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: {type: string}
+        reason: {type: string}
+        metadata: {type: object}
+  responses:
+    Success:
+      description: Successful operation
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [success, data, requestId]
+            properties:
+              success: {type: boolean, enum: [true]}
+              data: {type: object}
+              requestId: {type: string}
+    ValidationError:
+      description: Invalid request
+      content:
+        application/json:
+          schema: {$ref: '#/components/schemas/Error'}
+    Unauthorized:
+      description: Missing or invalid Cognito JWT
+    Forbidden:
+      description: Cognito user is not authorized for the operation
+    Error:
+      type: object
+      required: [success, error, requestId]
+      properties:
+        success: {type: boolean, enum: [false]}
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: {type: string}
+            message: {type: string}
+        requestId: {type: string}
