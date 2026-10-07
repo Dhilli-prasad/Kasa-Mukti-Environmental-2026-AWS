@@ -1,10 +1,12 @@
-import { useRef, useState } from "react";
+﻿import { useRef, useState } from "react";
 import { Camera, CheckCircle2, FileImage, LoaderCircle, MapPin, Mic2, ScanLine, UploadCloud, X } from "lucide-react";
 import { motion } from "framer-motion";
 import { useTranslation } from "../lib/i18n";
+import { apiRequest } from "../lib/api";
+import { isDemoMode } from "../lib/config";
 
-import { apiBaseUrl, isDemoMode } from "../lib/config";
 const DEMO_PREVIEW = `data:image/svg+xml,${encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 620"><defs><linearGradient id="g" x1="0" x2="1"><stop stop-color="#102d25"/><stop offset="1" stop-color="#28735b"/></linearGradient></defs><rect width="900" height="620" fill="url(#g)"/><circle cx="760" cy="90" r="150" fill="#9be15d" opacity=".16"/><path d="M390 485c-34-80-30-222 20-295 22-32 72-36 98-5 48 56 68 179 40 300z" fill="#e9efe3"/><path d="M456 208h70l-8 46h-54z" fill="#f0b94f"/><path d="M449 258h85v190c-20 38-65 38-85 0z" fill="#edf4ea"/><path d="M449 305h85v70h-85z" fill="#e8aa3d"/><text x="32" y="570" fill="#d8f7df" font-family="sans-serif" font-size="26" font-weight="700">WARD 12 · SAFE RETURN DEMO</text></svg>`)}`;
+
 const DEMO_RESULT = {
   category: "agricultural-container",
   materialType: "HDPE",
@@ -30,30 +32,73 @@ export default function Scanner({ citizenId, onAnalyzed, demoMode = isDemoMode }
 
   const choose = (selected) => {
     const next = selected?.[0];
-    if (!next || !next.type.startsWith("image/")) { setError("Choose a valid image file."); return; }
-    setFile(next); setResult(null); setError(""); setPreview(URL.createObjectURL(next));
+    if (!next || !next.type.startsWith("image/")) {
+      setError("Choose a valid image file.");
+      return;
+    }
+    setFile(next);
+    setResult(null);
+    setError("");
+    setPreview(URL.createObjectURL(next));
   };
+
   const analyze = async () => {
     if (!file) return;
-    if (!demoMode && !apiBaseUrl) { setError("Live API is not configured. Set VITE_API_BASE_URL in frontend/.env, or enable VITE_DEMO_MODE=true for the presentation demo."); return; }
-    setBusy(true); setError("");
+
+    setBusy(true);
+    setError("");
+
     try {
       if (demoMode) {
         setResult(DEMO_RESULT);
         onAnalyzed?.(DEMO_RESULT);
         return;
       }
-      const imageData = await new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(reader.result); reader.onerror = () => reject(new Error("Could not read image")); reader.readAsDataURL(file); });
-      const response = await fetch(`${apiBaseUrl}/analyze`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ imageData, citizenId, language }) });
-      const payload = await response.json();
-      if (!response.ok) throw new Error(payload.error || `AWS API returned ${response.status}`);
-      setResult(payload.scan); onAnalyzed?.(payload.scan);
-    } catch (requestError) { setError(requestError.message); } finally { setBusy(false); }
+
+      const imageData = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = () => reject(new Error("Could not read image"));
+        reader.readAsDataURL(file);
+      });
+
+      const payload = await apiRequest("/waste/analyze", {
+        role: "CITIZEN",
+        userId: citizenId,
+        method: "POST",
+        body: JSON.stringify({
+          imageData,
+          citizenId,
+          language
+        })
+      });
+
+      const scan = payload.scan || payload;
+      setResult(scan);
+      onAnalyzed?.(scan);
+    } catch (requestError) {
+      setError(requestError.message || "Unable to analyze the waste image.");
+    } finally {
+      setBusy(false);
+    }
   };
-  const speak = () => { if (!result?.disposal_instructions || !("speechSynthesis" in window)) { setError(t("waste.speechUnavailable")); return; } window.speechSynthesis.cancel(); const instruction = result.disposal_instructions[language] || result.disposal_instructions.English; window.speechSynthesis.speak(new SpeechSynthesisUtterance(instruction)); };
+
+  const speak = () => {
+    if (!result?.disposal_instructions || !("speechSynthesis" in window)) {
+      setError(t("waste.speechUnavailable"));
+      return;
+    }
+
+    window.speechSynthesis.cancel();
+    const instruction =
+      result.disposal_instructions[language] ||
+      result.disposal_instructions.English;
+
+    window.speechSynthesis.speak(new SpeechSynthesisUtterance(instruction));
+  };
 
   return <section className="glass rounded-3xl p-6"><div className="mb-5 flex items-start justify-between"><div><p className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[.2em] text-emerald-300"><ScanLine size={14} /> {demoMode ? t("waste.simulatedVision") : t("waste.vision")}</p><h2 className="font-display text-2xl font-semibold">{t("waste.analyze")}</h2><p className="mt-2 text-sm text-slate-400">{demoMode ? t("waste.demoResult") : t("waste.liveResult")}</p></div><div className="rounded-xl bg-emerald-400/10 p-2 text-emerald-300"><Camera size={20} /></div></div>
-    {!preview ? <button onClick={() => inputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); choose(event.dataTransfer.files); }} className="group flex min-h-72 w-full flex-col items-center justify-center rounded-2xl border border-dashed border-emerald-300/25 bg-emerald-400/[.03] p-6 text-center transition hover:border-emerald-300/60 hover:bg-emerald-400/[.07]"><UploadCloud className="mb-4 text-emerald-300 transition group-hover:-translate-y-1" size={34} /><p className="font-semibold">Drop an image here</p><p className="mt-2 text-sm text-slate-500">or tap to browse · camera-ready on mobile</p></button> : <div className="relative overflow-hidden rounded-2xl"><img src={preview} alt="Waste preview" className="max-h-80 w-full object-cover" />{busy && <motion.div initial={{ top: 0 }} animate={{ top: "100%" }} transition={{ repeat: Infinity, duration: 1.8, ease: "linear" }} className="absolute left-0 h-1 w-full bg-emerald-300 shadow-[0_0_20px_5px_rgba(110,231,183,.7)]" />}<button onClick={() => { setFile(null); setPreview(""); setResult(null); }} className="absolute right-3 top-3 rounded-full bg-black/60 p-2 text-white"><X size={16} /></button></div>}
+    {!preview ? <button onClick={() => inputRef.current?.click()} onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); choose(event.dataTransfer.files); }} className="group flex min-h-72 w-full flex-col items-center justify-center rounded-2xl border border-dashed border-emerald-300/25 bg-emerald-400/[.03] p-6 text-center transition hover:border-emerald-300/60 hover:bg-emerald-400/[.07]"><UploadCloud className="mb-4 text-emerald-300 transition group-hover:-translate-y-1" size={34} /><p className="font-semibold">Drop an image here</p><p className="mt-2 text-sm text-slate-500">or tap to browse · camera-ready on mobile</p></button> : <div className="relative overflow-hidden rounded-2xl"><img src={preview} alt="Waste preview" className="max-h-80 w-full object-cover" />{busy && <motion.div initial={{ top: 0 }} animate={{ top:"100%" }} transition={{ repeat: Infinity, duration: 1.8, ease: "linear" }} className="absolute left-0 h-1 w-full bg-emerald-300 shadow-[0_0_20px_5px_rgba(110,231,183,.7)]" />}<button onClick={() => { setFile(null); setPreview(""); setResult(null); }} className="absolute right-3 top-3 rounded-full bg-black/60 p-2 text-white"><X size={16} /></button></div>}
     <input ref={inputRef} type="file" accept="image/*" capture="environment" onChange={(event) => choose(event.target.files)} className="hidden" />
     {preview && !result && <button disabled={busy} onClick={analyze} className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-400 py-3 text-sm font-bold text-[#071411] disabled:opacity-50">{busy ? <><LoaderCircle size={17} className="animate-spin" /> Calling Amazon Bedrock…</> : <><FileImage size={17} /> Identify with AI</>}</button>}
     {error && <p className="mt-4 rounded-xl border border-rose-400/20 bg-rose-400/10 p-3 text-sm text-rose-300">{error}</p>}
